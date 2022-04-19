@@ -22,6 +22,7 @@ use sp_std::prelude::*;
 #[cfg(feature = "std")]
 use sp_version::NativeVersion;
 use sp_version::RuntimeVersion;
+use frame_support::PalletId;
 
 // A few exports that help ease life for downstream crates.
 pub use frame_support::{
@@ -268,6 +269,10 @@ impl pallet_sudo::Config for Runtime {
 	type Call = Call;
 }
 
+parameter_types! {
+	pub const PoolPalletId: PalletId = PalletId(*b"py/lotto");
+}
+
 /// config pallet forum
 impl pallet_forum::Config for Runtime {
 	type Event = Event;
@@ -275,6 +280,7 @@ impl pallet_forum::Config for Runtime {
 	type ThreadRandomness = RandomnessCollectiveFlip;
 	type ThreadTime = Timestamp;
 	type WeightInfo = pallet_forum::weights::SubstrateWeightInfo<Runtime>;
+	type PalletId = PoolPalletId;
 }
 
 // Create the runtime by composing the FRAME pallets that were previously configured.
