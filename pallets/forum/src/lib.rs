@@ -12,63 +12,36 @@ mod tests;
 mod benchmarking;
 
 pub mod weights;
+mod types;
 
 #[frame_support::pallet]
 pub mod pallet {
-    use frame_support::{pallet_prelude::*};
+    use frame_support::{pallet_prelude::*, PalletId};
     use frame_system::pallet_prelude::*;
     use frame_support::{
-		traits::{Randomness, Currency, tokens::ExistenceRequirement, Time},
-		transactional,
-	};
+        traits::{Randomness, Currency, tokens::ExistenceRequirement, Time},
+        transactional,
+    };
     use sp_io::hashing::blake2_128;
     use scale_info::TypeInfo;
     use core::fmt::Debug;
     use frame_support::inherent::Vec;
-    use sp_runtime::traits::{Hash, Zero};
+    use sp_runtime::traits::{AccountIdConversion, Hash, Zero};
 
     #[cfg(feature = "std")]
     use frame_support::serde::{Deserialize, Serialize};
+    use frame_support::traits::tokens::Balance;
 
     use log::{info, error};
+    use crate::types::{Priority, Thread, ThreadDto};
 
     use crate::weights::WeightInfo;
-
 
     type AccountOf<T> = <T as frame_system::Config>::AccountId;
     type BalanceOf<T> =
     <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
     type TimeOf<T> = <<T as Config>::ThreadTime as frame_support::traits::Time>::Moment;
-
-    // Struct for holding Thread information.
-    #[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo)]
-    #[scale_info(skip_type_params(T))]
-    #[codec(mel_bound())]
-    pub struct Thread<T: Config> {
-        pub id: Option<T::Hash>,
-        pub topic: Topic,
-        pub title: Vec<u8>,
-        pub content: Vec<u8>,
-        pub priority: Priority,
-        pub author: AccountOf<T>,
-        pub price: BalanceOf<T>,
-        pub created: TimeOf<T>,
-        pub close_time: TimeOf<T>,
-    }
-
-    // Enum declaration for Gender.
-    #[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo)]
-    #[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
-    pub enum Priority {
-        High,
-        Normal,
-	}
-
-    #[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo)]
-    #[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
-    pub enum Topic {
-        English
-    }
+    type HashOf<T> = <T as frame_system::Config>::Hash;
 
     #[pallet::pallet]
     #[pallet::generate_store(pub (super) trait Store)]
@@ -90,6 +63,9 @@ pub mod pallet {
         type ThreadTime: Time;
 
         type WeightInfo: WeightInfo;
+
+        #[pallet::constant]
+        type PalletId: Get<PalletId>;
     }
 
     // Errors.
@@ -97,6 +73,7 @@ pub mod pallet {
     pub enum Error<T> {
         /// Handles arithmetic overflow when incrementing the Thread counter.
         ThreadCntOverflow,
+        FeeOverflow,
         /// An account cannot own more Forum than `MaxThreadCount`.
         ExceedMaxThreadOwned,
         /// Buyer cannot be the owner.
@@ -128,6 +105,9 @@ pub mod pallet {
         Transferred(T::AccountId, T::AccountId, T::Hash),
         /// A Thread was successfully bought. \[buyer, seller, thread_id, bid_price\]
         Bought(T::AccountId, T::AccountId, T::Hash, BalanceOf<T>),
+        PoolBalances(T::AccountId, BalanceOf<T>),
+        AuthorBalances(T::AccountId, BalanceOf<T>),
+        RootTransferPool(T::AccountId, BalanceOf<T>),
     }
 
     // Storage items.
@@ -140,7 +120,7 @@ pub mod pallet {
     #[pallet::storage]
     #[pallet::getter(fn threads)]
     /// Stores Map of Threads.
-    pub(super) type Threads<T: Config> = StorageMap<_, Twox64Concat, T::Hash, Thread<T>>;
+    pub(super) type Threads<T: Config> = StorageMap<_, Twox64Concat, T::Hash, Thread<AccountOf<T>, BalanceOf<T>, TimeOf<T>, HashOf<T>>>;
 
     #[pallet::storage]
     #[pallet::getter(fn threads_owned)]
@@ -151,38 +131,96 @@ pub mod pallet {
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
+
+        #[transactional]
         #[pallet::weight(10000000)]
-        pub fn create_new_thread(origin: OriginFor<T>) -> DispatchResult {
+        pub fn create_new_thread(origin: OriginFor<T>, dto: ThreadDto<BalanceOf<T>, TimeOf<T>>) -> DispatchResult {
             let author = ensure_signed(origin)?;
 
-            let thread = Thread {
-                id: None,
-                topic: Topic::English,
-                title: Vec::new(),
-                content: Vec::new(),
-                priority: Priority::High,
-                author: author.clone(),
-                price: sp_runtime::traits::Zero::zero(),
-                created: T::ThreadTime::now(),
-                close_time: T::ThreadTime::now(),
-            };
+            // create new thread
+            let mut thread: Thread<AccountOf<T>, BalanceOf<T>, TimeOf<T>, HashOf<T>> =
+                Thread::new(dto, author.clone(), T::ThreadTime::now());
 
+            // calculate the hash of thread
             let thread_hash = T::Hashing::hash_of(&thread);
 
+            // set the hash of thread to thread id
+            thread.id = Some(thread_hash.clone());
+
+            // insert threads storage
             <Threads<T>>::insert(&thread_hash, thread.clone());
 
+            // insert to threads owner
             <ThreadsOwned<T>>::mutate(&author, |thread_vec| {
                 thread_vec.push(thread_hash)
             });
 
+            // increase thread count
             let new_cnt = Self::thread_cnt().checked_add(1)
                 .ok_or(<Error<T>>::ThreadCntOverflow)?;
 
             <ThreadCnt<T>>::put(new_cnt);
 
+            let mut total_fee = thread.price;
+
+            // increase total fee if priority is high
+            let high_fee: u32 = 1_00_000;
+            if Priority::High.eq(&thread.priority) {
+                total_fee +=high_fee.into();
+            }
+
+            // check the creator has enough free balance
+            ensure!(T::Currency::free_balance(&author) >= total_fee, <Error<T>>::NotEnoughBalance);
+
+            let account_id = Self::account_id();
+
+            // transfer amount from creator to thread amount pool
+            T::Currency::transfer(&author, &account_id, thread.price, ExistenceRequirement::KeepAlive);
+
+            Self::deposit_event(Event::AuthorBalances(author.clone(), T::Currency::free_balance(&author)));
+            Self::deposit_event(Event::PoolBalances(account_id.clone(), T::Currency::free_balance(&account_id)));
+
+            // deposit created new thread event
             Self::deposit_event(Event::Created(author, thread_hash));
 
             Ok(())
         }
+
+        #[transactional]
+        #[pallet::weight(1000)]
+        pub fn demo_pool_transfer(origin: OriginFor<T>) -> DispatchResult {
+            let receiver = ensure_signed(origin)?;
+
+            let value: u32 = 1_00_000;
+
+            let account_id = Self::account_id();
+
+            ensure!(T::Currency::free_balance(&Self::account_id()) >= value.into(), <Error<T>>::NotEnoughBalance);
+
+            // transfer amount from creator to thread amount pool
+            T::Currency::transfer(&Self::account_id(), &receiver, value.into(), ExistenceRequirement::KeepAlive);
+
+            Self::deposit_event(Event::AuthorBalances(receiver.clone(), T::Currency::free_balance(&receiver)));
+            Self::deposit_event(Event::PoolBalances(account_id.clone(), T::Currency::free_balance(&account_id)));
+
+
+            Ok(())
+        }
+
+        #[pallet::weight(1000)]
+        pub fn demo_get_pool_balance(origin: OriginFor<T>) -> DispatchResult {
+            let _ = ensure_signed(origin)?;
+
+            Self::deposit_event(Event::PoolBalances(Self::account_id(), T::Currency::free_balance(&Self::account_id())));
+
+            Ok(())
+        }
+    }
+
+    impl <T: Config> Pallet<T> {
+        pub fn account_id() -> T::AccountId {
+            T::PalletId::get().into_account()
+        }
+
     }
 }
