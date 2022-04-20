@@ -33,7 +33,8 @@ pub mod pallet {
     use frame_support::traits::tokens::Balance;
 
     use log::{info, error};
-    use crate::types::{Priority, Thread, ThreadDto};
+    use crate::pallet;
+    use crate::types::{Answer, Priority, Rank, Status, Thread, ThreadDto, Topic, Verify, Vote};
 
     use crate::weights::WeightInfo;
 
@@ -91,6 +92,15 @@ pub mod pallet {
         /// Ensures that an account has enough funds to purchase a Thread.
         NotEnoughBalance,
         ThreadExists,
+        ThreadClosed,
+        ThreadNotFound,
+        TopicNotFound,
+        NotPermission,
+        VoteCntOverflow,
+        TopicVoterAlreadyAdded,
+        TopicVoterNotExists,
+        ThreadNotAnswered,
+        RankingOverflow,
     }
 
     // Events.
@@ -98,16 +108,24 @@ pub mod pallet {
     #[pallet::generate_deposit(pub (super) fn deposit_event)]
     pub enum Event<T> where T: Config + Debug {
         /// A new Thread was successfully created. \[sender, thread_id\]
-        Created(T::AccountId, T::Hash),
+        Created(AccountOf<T>, HashOf<T>),
         /// Thread price was successfully set. \[sender, thread_id, new_price\]
-        PriceSet(T::AccountId, T::Hash, Option<BalanceOf<T>>),
+        PriceSet(AccountOf<T>, HashOf<T>, Option<BalanceOf<T>>),
         /// A Thread was successfully transferred. \[from, to, thread_id\]
-        Transferred(T::AccountId, T::AccountId, T::Hash),
+        Transferred(AccountOf<T>, AccountOf<T>, HashOf<T>),
         /// A Thread was successfully bought. \[buyer, seller, thread_id, bid_price\]
-        Bought(T::AccountId, T::AccountId, T::Hash, BalanceOf<T>),
-        PoolBalances(T::AccountId, BalanceOf<T>),
-        AuthorBalances(T::AccountId, BalanceOf<T>),
-        RootTransferPool(T::AccountId, BalanceOf<T>),
+        Bought(AccountOf<T>, AccountOf<T>, HashOf<T>, BalanceOf<T>),
+        PoolBalances(AccountOf<T>, BalanceOf<T>),
+        AuthorBalances(AccountOf<T>, BalanceOf<T>),
+        RootTransferPool(AccountOf<T>, BalanceOf<T>),
+        AnswerPushed(AccountOf<T>, HashOf<T>, HashOf<T>),
+        Voted(AccountOf<T>, HashOf<T>, HashOf<T>),
+        TopicVoterAdded(Topic, AccountOf<T>),
+        TopicVoterAlreadyAdded(Topic, AccountOf<T>),
+        ThreadAnswerVerified(HashOf<T>, HashOf<T>, AccountOf<T>),
+        ThreadAnswered(HashOf<T>, HashOf<T>),
+        AnswerForAccount(HashOf<T>, AccountOf<T>),
+        RankingUpdated(Topic, AccountOf<T>, u128),
     }
 
     // Storage items.
@@ -120,18 +138,61 @@ pub mod pallet {
     #[pallet::storage]
     #[pallet::getter(fn threads)]
     /// Stores Map of Threads.
-    pub(super) type Threads<T: Config> = StorageMap<_, Twox64Concat, T::Hash, Thread<AccountOf<T>, BalanceOf<T>, TimeOf<T>, HashOf<T>>>;
+    pub(super) type Threads<T: Config> = StorageMap<_, Twox64Concat, HashOf<T>, Thread<AccountOf<T>, BalanceOf<T>, TimeOf<T>, HashOf<T>>>;
 
     #[pallet::storage]
     #[pallet::getter(fn threads_owned)]
     /// Keeps track of what accounts own what Threads.
     pub(super) type ThreadsOwned<T: Config> =
-    StorageMap<_, Twox64Concat, T::AccountId, Vec<T::Hash>, ValueQuery>;
+    StorageMap<_, Twox64Concat, AccountOf<T>, Vec<HashOf<T>>, ValueQuery>;
 
+    #[pallet::storage]
+    #[pallet::getter(fn answers)]
+    /// answer id => answer
+    pub(super) type Answers<T: Config> = StorageMap<_, Twox64Concat, HashOf<T>, Answer<AccountOf<T>, TimeOf<T>, HashOf<T>>>;
+
+    #[pallet::storage]
+    #[pallet::getter(fn thread_answers)]
+    /// thread id => list of answer id of this thread
+    pub(super) type ThreadAnswers<T: Config> = StorageMap<_, Twox64Concat, HashOf<T>, Vec<HashOf<T>>, ValueQuery>;
+
+    #[pallet::storage]
+    #[pallet::getter(fn thread_best_answer)]
+    /// thread id => best answer id of this thread
+    pub(super) type ThreadBestAnswer<T: Config> = StorageMap<_, Twox64Concat, HashOf<T>, Verify<AccountOf<T>, TimeOf<T>, HashOf<T>>>;
+
+    #[pallet::storage]
+    #[pallet::getter(fn answer_owner)]
+    /// answer id => owner of answer
+    pub(super) type AnswerOwner<T: Config> = StorageMap<_, Twox64Concat, HashOf<T>, AccountOf<T>>;
+
+    #[pallet::storage]
+    #[pallet::getter(fn topic_voter)]
+    /// topic => list of account id has permission to vote
+    pub(super) type TopicVoter<T: Config> = StorageMap<_, Twox64Concat, Topic, Vec<AccountOf<T>>, ValueQuery>;
+
+    #[pallet::storage]
+    #[pallet::getter(fn answer_vote_cnt)]
+    /// answer id => vote number of this answer
+    pub(super) type AnswerVoteCnt<T: Config> = StorageMap<_, Twox64Concat, HashOf<T>, u64, ValueQuery>;
+
+    #[pallet::storage]
+    #[pallet::getter(fn answer_votes)]
+    /// answer id => list of voter vote for this answer
+    pub(super) type AnswerVoters<T: Config> = StorageMap<_, Twox64Concat, HashOf<T>, Vec<Vote<AccountOf<T>, TimeOf<T>>>, ValueQuery>;
+
+    #[pallet::storage]
+    #[pallet::getter(fn topic_verifiers)]
+    /// topic => list of verifier has permission to verify
+    pub(super) type TopicVerifiers<T: Config> = StorageMap<_, Twox64Concat, Topic, Vec<AccountOf<T>>, ValueQuery>;
+
+    #[pallet::storage]
+    #[pallet::getter(fn topic_ranking)]
+    /// topic => list of account id and best answer number of this account
+    pub(super) type TopicRanking<T: Config> = StorageDoubleMap<_, Twox64Concat, Topic, Twox64Concat, AccountOf<T>, u128, ValueQuery>;
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-
         #[transactional]
         #[pallet::weight(10000000)]
         pub fn create_new_thread(origin: OriginFor<T>, dto: ThreadDto<BalanceOf<T>, TimeOf<T>>) -> DispatchResult {
@@ -157,7 +218,7 @@ pub mod pallet {
 
             // increase thread count
             let new_cnt = Self::thread_cnt().checked_add(1)
-                .ok_or(<Error<T>>::ThreadCntOverflow)?;
+                .ok_or(Error::<T>::ThreadCntOverflow)?;
 
             <ThreadCnt<T>>::put(new_cnt);
 
@@ -166,16 +227,16 @@ pub mod pallet {
             // increase total fee if priority is high
             let high_fee: u32 = 1_00_000;
             if Priority::High.eq(&thread.priority) {
-                total_fee +=high_fee.into();
+                total_fee += high_fee.into();
             }
 
             // check the creator has enough free balance
-            ensure!(T::Currency::free_balance(&author) >= total_fee, <Error<T>>::NotEnoughBalance);
+            ensure!(T::Currency::free_balance(&author) >= total_fee, Error::<T>::NotEnoughBalance);
 
             let account_id = Self::account_id();
 
             // transfer amount from creator to thread amount pool
-            T::Currency::transfer(&author, &account_id, thread.price, ExistenceRequirement::KeepAlive);
+            T::Currency::transfer(&author, &account_id, total_fee, ExistenceRequirement::KeepAlive);
 
             Self::deposit_event(Event::AuthorBalances(author.clone(), T::Currency::free_balance(&author)));
             Self::deposit_event(Event::PoolBalances(account_id.clone(), T::Currency::free_balance(&account_id)));
@@ -195,7 +256,7 @@ pub mod pallet {
 
             let account_id = Self::account_id();
 
-            ensure!(T::Currency::free_balance(&Self::account_id()) >= value.into(), <Error<T>>::NotEnoughBalance);
+            ensure!(T::Currency::free_balance(&Self::account_id()) >= value.into(), Error::<T>::NotEnoughBalance);
 
             // transfer amount from creator to thread amount pool
             T::Currency::transfer(&Self::account_id(), &receiver, value.into(), ExistenceRequirement::KeepAlive);
@@ -215,12 +276,219 @@ pub mod pallet {
 
             Ok(())
         }
-    }
 
-    impl <T: Config> Pallet<T> {
-        pub fn account_id() -> T::AccountId {
-            T::PalletId::get().into_account()
+        #[pallet::weight(1000)]
+        pub fn push_answer(origin: OriginFor<T>, answer_content: Vec<u8>, thread_id: HashOf<T>) -> DispatchResult {
+            let answer_author = ensure_signed(origin)?;
+
+            let thread: Thread<AccountOf<T>, BalanceOf<T>, TimeOf<T>, HashOf<T>> =
+                Self::threads(&thread_id).ok_or(Error::<T>::ThreadNotFound)?;
+
+            ensure!(Status::Closed.ne(&thread.status), Error::<T>::ThreadClosed);
+
+            let mut answer = Answer {
+                id: None,
+                thread_id,
+                answer: answer_content,
+                author: answer_author.clone(),
+                created: T::ThreadTime::now(),
+            };
+
+            let answer_hash = T::Hashing::hash_of(&answer);
+
+            answer.id = Some(answer_hash.clone());
+
+            <Answers<T>>::insert(answer_hash, answer.clone());
+
+            <ThreadAnswers<T>>::mutate(&thread_id, |answer_vec| {
+                answer_vec.push(answer_hash)
+            });
+
+            AnswerOwner::<T>::insert(answer_hash.clone(), answer_author.clone());
+
+            Self::deposit_event(Event::AnswerPushed(answer_author, thread_id, answer_hash));
+
+            Ok(())
         }
 
+        #[pallet::weight(1000)]
+        pub fn vote(origin: OriginFor<T>, thread_id: HashOf<T>, answer_id: HashOf<T>) -> DispatchResult {
+            let voter = ensure_signed(origin)?;
+
+            let thread: Thread<AccountOf<T>, BalanceOf<T>, TimeOf<T>, HashOf<T>> =
+                Self::threads(&thread_id).ok_or(Error::<T>::ThreadNotFound)?;
+
+            let topic_voter: Vec<AccountOf<T>> = Self::topic_voter(thread.topic);
+
+            if !topic_voter.contains(&voter) {
+                return Err(Error::<T>::NotPermission.into());
+            }
+
+            let new_vote = Self::answer_vote_cnt(answer_id.clone()).checked_add(1)
+                .ok_or(Error::<T>::VoteCntOverflow)?;
+
+            <AnswerVoteCnt<T>>::insert(answer_id.clone(), new_vote);
+
+            let vote = Vote {
+                voter: voter.clone(),
+                vote_time: T::ThreadTime::now(),
+            };
+
+            <AnswerVoters<T>>::mutate(&answer_id, |voter_vec| { voter_vec.push(vote) });
+
+            Self::deposit_event(Event::Voted(voter, thread_id, answer_id));
+
+            Ok(())
+        }
+
+        #[pallet::weight(1000)]
+        pub fn add_topic_voter(origin: OriginFor<T>, topic: Topic, new_voter: AccountOf<T>) -> DispatchResult {
+            // let _ = ensure_root(origin)?;
+
+            let _ = ensure_signed(origin)?;
+            // todo ensure root
+
+            <TopicVoter<T>>::mutate(&topic, |voter_vec| {
+                match voter_vec.binary_search(&new_voter) {
+                    Ok(_) => Err(Error::<T>::TopicVoterAlreadyAdded.into()),
+                    Err(_) => {
+                        voter_vec.push(new_voter.clone());
+                        Self::deposit_event(Event::TopicVoterAdded(topic.clone(), new_voter));
+                        Ok(())
+                    }
+                }
+            })
+        }
+
+        #[pallet::weight(1000)]
+        pub fn remove_topic_voter(origin: OriginFor<T>, topic: Topic, voter: AccountOf<T>) -> DispatchResult {
+            // let _ = ensure_root(origin)?;
+
+            let _ = ensure_signed(origin)?;
+            // todo ensure root
+
+            <TopicVoter<T>>::mutate(&topic, |voter_vec| {
+                match voter_vec.binary_search(&voter) {
+                    Ok(index) => {
+                        voter_vec.remove(index);
+                        Self::deposit_event(Event::TopicVoterAdded(topic.clone(), voter));
+                        Ok(())
+                    }
+                    Err(_) => Err(Error::<T>::TopicVoterAlreadyAdded.into()),
+                }
+            })
+        }
+
+        #[pallet::weight(1000)]
+        pub fn verify(origin: OriginFor<T>, thread_id: HashOf<T>, answer_id: HashOf<T>) -> DispatchResult {
+            let verifier = ensure_signed(origin)?;
+
+            let thread: Thread<AccountOf<T>, BalanceOf<T>, TimeOf<T>, HashOf<T>> =
+                Self::threads(&thread_id).ok_or(Error::<T>::ThreadNotFound)?;
+
+            let verifiers: Vec<AccountOf<T>> = Self::topic_verifiers(thread.topic.clone());
+
+            match verifiers.binary_search(&verifier) {
+                Ok(_) => {
+                    let verify = Verify {
+                        verifier: verifier.clone(),
+                        verify_time: T::ThreadTime::now(),
+                        best_answer_id: answer_id.clone(),
+                    };
+                    ThreadBestAnswer::<T>::insert(thread_id.clone(), verify);
+                    Self::deposit_event(Event::ThreadAnswerVerified(thread_id, answer_id, verifier));
+                    Threads::<T>::mutate(&thread_id, |thread_option| {
+                        if let Some(thread) = thread_option {
+                            thread.status = Status::Answered;
+                            Self::deposit_event(Event::ThreadAnswered(thread_id.clone(), answer_id.clone()));
+                        }
+                    });
+                    let best_answer_owner: AccountOf<T> = Self::answer_owner(answer_id.clone()).unwrap();
+
+                    // increase account ranking
+                    let new_ranking = Self::topic_ranking(thread.topic.clone(), best_answer_owner.clone()).checked_add(1)
+                        .ok_or(Error::<T>::RankingOverflow)?;
+
+                    TopicRanking::<T>::insert(thread.topic.clone(), best_answer_owner.clone(), new_ranking);
+
+                    Self::deposit_event(Event::RankingUpdated(thread.topic.clone(), best_answer_owner.clone(), new_ranking));
+
+                    // todo payout for answerer and voter
+                    Ok(())
+                }
+                Err(_) => Err(Error::<T>::NotPermission.into()),
+            }
+        }
+
+        #[pallet::weight(1000)]
+        pub fn add_topic_verifier(origin: OriginFor<T>, topic: Topic, new_verifier: AccountOf<T>) -> DispatchResult {
+            // let _ = ensure_root(origin)?;
+
+            let _ = ensure_signed(origin)?;
+            // todo ensure root
+
+            <TopicVerifiers<T>>::mutate(&topic, |verifier_vec| {
+                match verifier_vec.binary_search(&new_verifier) {
+                    Ok(_) => Err(Error::<T>::TopicVoterAlreadyAdded.into()),
+                    Err(_) => {
+                        verifier_vec.push(new_verifier.clone());
+                        Self::deposit_event(Event::TopicVoterAdded(topic.clone(), new_verifier));
+                        Ok(())
+                    }
+                }
+            })
+        }
+
+        #[pallet::weight(1000)]
+        pub fn remove_topic_verifier(origin: OriginFor<T>, topic: Topic, verifier: AccountOf<T>) -> DispatchResult {
+            // let _ = ensure_root(origin)?;
+
+            let _ = ensure_signed(origin)?;
+            // todo ensure root
+
+            <TopicVerifiers<T>>::mutate(&topic, |verifier_vec| {
+                match verifier_vec.binary_search(&verifier) {
+                    Ok(index) => {
+                        verifier_vec.remove(index);
+                        Self::deposit_event(Event::TopicVoterAdded(topic.clone(), verifier));
+                        Ok(())
+                    }
+                    Err(_) => Err(Error::<T>::TopicVoterAlreadyAdded.into()),
+                }
+            })
+        }
+
+        /// Phần này làm trên blockchain không được, tại blockchain tất cả thông tin đề public.
+        /// Đây cũng là điểm cần lưu ý khi ứng dụng blockchain vào dự án thực thế.
+        /// Hiện tại cứ làm trong đây để có bản demo
+        #[pallet::weight(1000)]
+        pub fn watch_answer(origin: OriginFor<T>, thread_id: HashOf<T>) -> DispatchResult{
+            let watcher = ensure_signed(origin)?;
+
+            let thread: Thread<AccountOf<T>, BalanceOf<T>, TimeOf<T>, HashOf<T>> =
+                Self::threads(&thread_id).ok_or(Error::<T>::ThreadNotFound)?;
+
+            if Status::Answered.ne(&thread.status) {
+                return Err(Error::<T>::ThreadNotAnswered.into());
+            }
+
+            let thread_author: AccountOf<T> = thread.author;
+            let thread_best_answer: Verify<AccountOf<T>, TimeOf<T>, HashOf<T>> =
+                Self::thread_best_answer(thread_id.clone()).ok_or(Error::<T>::ThreadNotAnswered)?;
+            let best_answer_id = thread_best_answer.best_answer_id;
+            let thread_answer_author: AccountOf<T>  = Self::answer_owner(best_answer_id.clone()).unwrap();
+            let thread_answer_voter: Vec<Vote<AccountOf<T>, TimeOf<T>>> = Self::answer_votes(best_answer_id.clone());
+            let fee: u32 = 1_00_000;
+            // todo transfer fee to thread author and thread answerer and voter for this answer
+
+            Self::deposit_event(Event::AnswerForAccount(best_answer_id, watcher));
+            Ok(())
+        }
+    }
+
+    impl<T: Config> Pallet<T> {
+        pub fn account_id() -> AccountOf<T> {
+            T::PalletId::get().into_account()
+        }
     }
 }

@@ -26,6 +26,7 @@ pub struct Thread<AccountOf, BalanceOf, TimeOf, HashOf> {
     pub price: BalanceOf,
     pub created: TimeOf,
     pub close_time: TimeOf,
+    pub status: Status,
 }
 
 #[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo)]
@@ -51,8 +52,19 @@ pub enum Priority {
 #[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo)]
 #[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
 pub enum Topic {
-    English
+    English,
+    IT,
 }
+
+#[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo)]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
+pub enum Status {
+    Opening,
+    Closed,
+    Canceled,
+    Answered,
+}
+
 
 impl <AccountOf, BalanceOf, TimeOf, HashOf> Thread<AccountOf, BalanceOf, TimeOf, HashOf> {
     pub fn new(dto: ThreadDto<BalanceOf, TimeOf>, author: AccountOf, created: TimeOf) -> Thread<AccountOf, BalanceOf, TimeOf, HashOf> {
@@ -66,6 +78,43 @@ impl <AccountOf, BalanceOf, TimeOf, HashOf> Thread<AccountOf, BalanceOf, TimeOf,
             price: dto.price,
             created,
             close_time: dto.close_time,
+            status: Status::Opening,
         }
     }
+}
+
+#[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo)]
+#[scale_info(skip_type_params(T))]
+#[codec(mel_bound())]
+pub struct Answer<AccountOf, TimeOf, HashOf> {
+    pub id: Option<HashOf>,
+    pub thread_id: HashOf,
+    pub answer: Vec<u8>,
+    pub author: AccountOf,
+    pub created: TimeOf,
+}
+
+#[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo)]
+#[scale_info(skip_type_params(T))]
+#[codec(mel_bound())]
+pub struct Vote<AccountOf, TimeOf> {
+    pub voter: AccountOf,
+    pub vote_time: TimeOf,
+}
+
+#[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo)]
+#[scale_info(skip_type_params(T))]
+#[codec(mel_bound())]
+pub struct Verify<AccountOf, TimeOf, HashOf> {
+    pub verifier: AccountOf,
+    pub verify_time: TimeOf,
+    pub best_answer_id: HashOf,
+}
+
+#[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo)]
+#[scale_info(skip_type_params(T))]
+#[codec(mel_bound())]
+pub struct Rank<AccountOf> {
+    pub account: AccountOf,
+    pub number_of_best_answer: u128,
 }
