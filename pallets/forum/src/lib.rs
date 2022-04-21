@@ -126,6 +126,11 @@ pub mod pallet {
         ThreadAnswered(HashOf<T>, HashOf<T>),
         AnswerForAccount(HashOf<T>, AccountOf<T>),
         RankingUpdated(Topic, AccountOf<T>, u128),
+        // A Thread has been closed with no reply
+        ThreadClosedWithOutAnswer(HashOf<T>),
+        // A Thread has been closed with reply and executed transfer function
+        ThreadCloseWithAnswer(HashOf<T>, AccountOf<T>, AccountOf<T>, BalanceOf<T>)
+
     }
 
     // Storage items.
@@ -236,7 +241,7 @@ pub mod pallet {
             let account_id = Self::account_id();
 
             // transfer amount from creator to thread amount pool
-            T::Currency::transfer(&author, &account_id, total_fee, ExistenceRequirement::KeepAlive);
+            T::Currency::transfer(&author, &account_id, total_fee, ExistenceRequirement::KeepAlive)?;
 
             Self::deposit_event(Event::AuthorBalances(author.clone(), T::Currency::free_balance(&author)));
             Self::deposit_event(Event::PoolBalances(account_id.clone(), T::Currency::free_balance(&account_id)));
@@ -259,7 +264,7 @@ pub mod pallet {
             ensure!(T::Currency::free_balance(&Self::account_id()) >= value.into(), Error::<T>::NotEnoughBalance);
 
             // transfer amount from creator to thread amount pool
-            T::Currency::transfer(&Self::account_id(), &receiver, value.into(), ExistenceRequirement::KeepAlive);
+            T::Currency::transfer(&Self::account_id(), &receiver, value.into(), ExistenceRequirement::KeepAlive)?;
 
             Self::deposit_event(Event::AuthorBalances(receiver.clone(), T::Currency::free_balance(&receiver)));
             Self::deposit_event(Event::PoolBalances(account_id.clone(), T::Currency::free_balance(&account_id)));
@@ -484,11 +489,63 @@ pub mod pallet {
             Self::deposit_event(Event::AnswerForAccount(best_answer_id, watcher));
             Ok(())
         }
+
+        #[pallet::weight(0)]
+        pub fn user_close_thread(origin: OriginFor<T>, thread_id: HashOf<T>) -> DispatchResult {
+            let caller = ensure_signed(origin)?;
+            if !Self::threads_owned(caller).contains(&thread_id) {
+                return Err(Error::<T>::NotThreadOwner.into());
+            }
+            Self::close_thread(thread_id)
+        }
+
+        // TODO: add auto close thread when thread_close_time is over
     }
 
     impl<T: Config> Pallet<T> {
         pub fn account_id() -> AccountOf<T> {
             T::PalletId::get().into_account()
         }
+
+        pub fn close_thread(thread_id: HashOf<T>) -> DispatchResult {
+            let mut thread: Thread<AccountOf<T>, BalanceOf<T>, TimeOf<T>, HashOf<T>> =
+                Self::threads(&thread_id).ok_or(Error::<T>::ThreadNotFound)?;
+
+            let get_best_answer = Self::get_currently_best_answer(thread_id);
+
+            if get_best_answer.len() == 0 {
+                Self::deposit_event(Event::ThreadClosedWithOutAnswer(thread_id));
+            }
+            else if get_best_answer.len() == 1 {
+                let best_ans_author = get_best_answer[0].author.clone();
+                T::Currency::transfer(&thread.author, &best_ans_author, thread.price, ExistenceRequirement::KeepAlive)?;
+                Self::deposit_event(Event::ThreadCloseWithAnswer(thread_id, thread.author, best_ans_author, thread.price));
+            }
+            // TODO: add to needed verify answer list
+            // else {}
+
+            thread.status = pallet::Status::Closed;
+            
+            Ok(())
+        }
+
+        // get a list of best answer frome a thread id
+        pub fn get_currently_best_answer(thread_id: HashOf<T>) ->Vec<Answer<AccountOf<T>, TimeOf<T>, HashOf<T>>> {
+            let answer_list = Self::thread_answers(thread_id);
+            let mut highest_vote = 0;
+            let mut best_answer_list = Vec::<Answer<AccountOf<T>, TimeOf<T>, HashOf<T>>>::new();
+            for n in 0..answer_list.len() {
+                let index_vote_cnt = Self::answer_vote_cnt(answer_list[n]);
+                if highest_vote < index_vote_cnt {
+                    highest_vote = index_vote_cnt;
+                    best_answer_list.clear();
+                }
+                if highest_vote == index_vote_cnt {
+                    best_answer_list.push(Self::answers(answer_list[n]).unwrap());
+                }
+            }
+            best_answer_list
+        }
     }
 }
+//
